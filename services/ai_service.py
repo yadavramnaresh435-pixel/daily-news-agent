@@ -4,9 +4,9 @@ AI summarization service.
 Turns raw Tavily search results into the formatted Telegram HTML digest
 text, and assembles all per-category digests into the final message body.
 
-Provider: OpenRouter (REST API — see `OpenRouterClient` below). Previously
-backed by the Gemini SDK; the public functions below are unchanged so no
-other module needed modification when the provider was swapped.
+Provider: Groq (REST API — see `GroqClient` below). Previously backed by
+the Gemini SDK / OpenRouter; the public functions below are unchanged so
+no other module needed modification when the provider was swapped.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ import requests
 
 from config.constants import (
     Category,
-    OPENROUTER_MAX_RETRIES,
-    OPENROUTER_RETRY_BACKOFF_SECONDS,
-    OPENROUTER_TIMEOUT_SECONDS,
+    GROQ_MAX_RETRIES,
+    GROQ_RETRY_BACKOFF_SECONDS,
+    GROQ_TIMEOUT_SECONDS,
     SYSTEM_INSTRUCTION,
 )
 from services.tavily_service import SearchResult
@@ -39,9 +39,10 @@ class CategoryDigest:
     error: Optional[str] = None
 
 
-class OpenRouterClient:
+class GroqClient:
     """
-    Reusable, minimal client for OpenRouter's chat-completions REST API.
+    Reusable, minimal client for Groq's OpenAI-compatible chat-completions
+    REST API.
 
     Handles auth headers, request timeout, and retrying transient failures
     with a short backoff. Instantiated once in main.py and passed into
@@ -54,8 +55,8 @@ class OpenRouterClient:
         api_key: str,
         base_url: str,
         model: str,
-        timeout: int = OPENROUTER_TIMEOUT_SECONDS,
-        max_retries: int = OPENROUTER_MAX_RETRIES,
+        timeout: int = GROQ_TIMEOUT_SECONDS,
+        max_retries: int = GROQ_MAX_RETRIES,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -97,13 +98,13 @@ class OpenRouterClient:
             except Exception as exc:  # noqa: BLE001 - retry on any transient error
                 last_exc = exc
                 log.warning(
-                    "OpenRouter request attempt %d/%d failed: %s",
+                    "Groq request attempt %d/%d failed: %s",
                     attempt,
                     self.max_retries,
                     exc,
                 )
                 if attempt < self.max_retries:
-                    time.sleep(OPENROUTER_RETRY_BACKOFF_SECONDS * attempt)
+                    time.sleep(GROQ_RETRY_BACKOFF_SECONDS * attempt)
 
         raise last_exc  # retries exhausted — let the caller apply its fallback
 
@@ -121,16 +122,16 @@ def build_user_prompt(category: Category, results: list[SearchResult]) -> str:
 
 
 def summarize_with_gemini(
-    client: OpenRouterClient, category: Category, results: list[SearchResult]
+    client: GroqClient, category: Category, results: list[SearchResult]
 ) -> str:
     """
-    Summarize one category's search results via the configured OpenRouter
+    Summarize one category's search results via the configured Groq
     model. Falls back to a graceful placeholder string on any API failure
     (including after retries are exhausted).
 
     Function name kept as `summarize_with_gemini` for interface stability —
     this is the AI service's public entry point and no other module needs
-    to change — even though the underlying provider is now OpenRouter.
+    to change — even though the underlying provider is now Groq.
     """
     if not results:
         return "No significant fresh updates found for this category today."
@@ -140,7 +141,7 @@ def summarize_with_gemini(
     try:
         return client.chat(system_instruction=SYSTEM_INSTRUCTION, user_prompt=prompt, temperature=0.4)
     except Exception as exc:  # noqa: BLE001 - never let one bad summary kill the run
-        log.error("OpenRouter summarization failed for '%s': %s", category.name, exc)
+        log.error("Groq summarization failed for '%s': %s", category.name, exc)
         # Fallback: build a minimal manual digest so links are never lost.
         fallback_lines = []
         for r in results:
