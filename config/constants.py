@@ -49,21 +49,21 @@ CATEGORIES: list[Category] = [
 
 
 # ==========================================================================
-# OpenRouter (AI summarization) settings
+# Groq (AI summarization) settings
 #
-# These are default values. AI_PROVIDER, MODEL_NAME, and OPENROUTER_BASE_URL
+# These are default values. AI_PROVIDER, MODEL_NAME, and GROQ_BASE_URL
 # can each be overridden at runtime via environment variables of the same
 # name (see config/settings.py) — these constants are only the fallbacks
 # used when no override is set.
 # ==========================================================================
 
-DEFAULT_AI_PROVIDER = "OPENROUTER"
-DEFAULT_MODEL_NAME = "google/gemini-2.5-flash"
-DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_AI_PROVIDER = "GROQ"
+DEFAULT_MODEL_NAME = "llama-3.3-70b-versatile"
+DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-OPENROUTER_TIMEOUT_SECONDS = 30
-OPENROUTER_MAX_RETRIES = 3
-OPENROUTER_RETRY_BACKOFF_SECONDS = 2  # multiplied by attempt number between retries
+GROQ_TIMEOUT_SECONDS = 30
+GROQ_MAX_RETRIES = 3
+GROQ_RETRY_BACKOFF_SECONDS = 2  # multiplied by attempt number between retries
 
 SYSTEM_INSTRUCTION = """\
 You are the lead content strategist and research analyst for hinduresearch.com, \
@@ -124,5 +124,5 @@ REQUIRED_ENV_VARS = [
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "TAVILY_API_KEY",
-    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
 ]
