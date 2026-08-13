@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from config.constants import (
     DEFAULT_AI_PROVIDER,
     DEFAULT_MODEL_NAME,
-    DEFAULT_OPENROUTER_BASE_URL,
+    DEFAULT_GROQ_BASE_URL,
     REQUIRED_ENV_VARS,
 )
 from utils.logger import get_logger
@@ -39,10 +39,10 @@ class Settings:
     telegram_bot_token: str
     telegram_chat_id: str
     tavily_api_key: str
-    openrouter_api_key: str
+    groq_api_key: str
     ai_provider: str
     model_name: str
-    openrouter_base_url: str
+    groq_base_url: str
 
 
 def load_settings() -> Settings:
@@ -58,14 +58,15 @@ def load_settings() -> Settings:
     # required for the agent to keep working out of the box.
     ai_provider = os.environ.get("AI_PROVIDER", "").strip() or DEFAULT_AI_PROVIDER
     model_name = os.environ.get("MODEL_NAME", "").strip() or DEFAULT_MODEL_NAME
-    openrouter_base_url = os.environ.get("OPENROUTER_BASE_URL", "").strip() or DEFAULT_OPENROUTER_BASE_URL
+    groq_base_url = os.environ.get("GROQ_BASE_URL", "").strip() or DEFAULT_GROQ_BASE_URL
 
     return Settings(
         telegram_bot_token=raw["TELEGRAM_BOT_TOKEN"],
         telegram_chat_id=raw["TELEGRAM_CHAT_ID"],
         tavily_api_key=raw["TAVILY_API_KEY"],
-        openrouter_api_key=raw["OPENROUTER_API_KEY"],
+        groq_api_key=raw["GROQ_API_KEY"],
         ai_provider=ai_provider,
         model_name=model_name,
-        openrouter_base_url=openrouter_base_url,
-    )
+        groq_base_url=groq_base_url,
+)
+    
