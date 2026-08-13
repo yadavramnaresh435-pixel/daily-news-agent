@@ -1,4 +1,0 @@
-google-genai
-tavily-python
-requests
-python-dotenv
