@@ -68,5 +68,4 @@ def load_settings() -> Settings:
         ai_provider=ai_provider,
         model_name=model_name,
         groq_base_url=groq_base_url,
-)
-    
+    )
