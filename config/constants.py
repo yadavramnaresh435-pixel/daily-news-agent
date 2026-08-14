@@ -137,3 +137,21 @@ REQUIRED_ENV_VARS = [
     "TAVILY_API_KEY",
     "GROQ_API_KEY",
 ]
+
+
+# ==========================================================================
+# Website publishing (hinduresearch.com) settings — Phase 6.0
+#
+# These are only defaults/fallbacks. The actual repository, token, and
+# branch are read from environment variables / GitHub Secrets at runtime
+# (see services/website_service.py) and are intentionally NOT defined here,
+# so nothing sensitive or environment-specific is hardcoded. Publishing is
+# entirely optional: if those secrets aren't set, website publishing is
+# skipped and the rest of the run (Telegram, memory) is unaffected.
+# ==========================================================================
+
+WEBSITE_DEFAULT_BRANCH = "main"
+WEBSITE_DEFAULT_DATA_PATH = "data/articles.json"
+WEBSITE_DEFAULT_COMMIT_NAME = "Hindu Research Agent"
+WEBSITE_DEFAULT_COMMIT_EMAIL = "actions@users.noreply.github.com"
+WEBSITE_SAME_STORY_SIMILARITY = 0.88  # same threshold style as memory_service dedupe
