@@ -108,15 +108,68 @@ TAVILY_MAX_RESULTS = 4
 TAVILY_SEARCH_DAYS = 1  # freshness window in days
 
 
+# ==========================================================================
+# Phase 5 — broad discovery queries
+#
+# main.py's generate_digest() runs a wide discovery pass across several
+# focused queries (rather than just the 4 CATEGORIES.query strings), split
+# between "news" and "general"/scholarly topics, before any deterministic
+# filtering, ranking, or AI review happens. Each tuple is:
+#   (category_name, query, topic)
+# - category_name must match a CATEGORIES[i].name exactly.
+# - topic is passed straight to Tavily's search `topic` parameter — Tavily
+#   only accepts "news" or "general".
+# The category_name here only affects logging / the initial bucket; the
+# real per-article category is re-derived from content afterwards via
+# _category_for_result(), so it is not load-bearing.
+# ==========================================================================
+
+DISCOVERY_QUERIES: list[tuple[str, str, str]] = [
+    # Archaeology & Ancient Discoveries
+    ("Archaeology & Ancient Discoveries", "archaeological excavation discovery India ancient site", "news"),
+    ("Archaeology & Ancient Discoveries", "ASI Archaeological Survey of India excavation report", "news"),
+    ("Archaeology & Ancient Discoveries", "ancient inscription epigraphy discovery India", "general"),
+    ("Archaeology & Ancient Discoveries", "temple restoration conservation heritage site India", "general"),
+    # Vedic & Manuscript Research
+    ("Vedic & Manuscript Research", "Sanskrit manuscript digitization translation research", "news"),
+    ("Vedic & Manuscript Research", "Indology Vedic studies research paper published", "news"),
+    ("Vedic & Manuscript Research", "palm-leaf manuscript critical edition Sanskrit text", "general"),
+    ("Vedic & Manuscript Research", "ancient Indian mathematics astronomy Ayurveda research study", "general"),
+    # Global Cultural & Temple Events
+    ("Global Cultural & Temple Events", "Hindu temple inauguration diaspora cultural event", "news"),
+    ("Global Cultural & Temple Events", "museum exhibition Indian heritage archive acquisition", "news"),
+    ("Global Cultural & Temple Events", "Hindu cultural heritage milestone global community", "general"),
+    ("Global Cultural & Temple Events", "national archives digital archive Indian history collection", "general"),
+    # Daily Research Hook / Topic Idea
+    ("Daily Research Hook / Topic Idea", "Indian philosophy Vedanta Upanishad scholarly analysis", "news"),
+    ("Daily Research Hook / Topic Idea", "Bhagavad Gita research interpretation study", "news"),
+    ("Daily Research Hook / Topic Idea", "Indian knowledge systems Gurukul Shastra research", "general"),
+    ("Daily Research Hook / Topic Idea", "Nyaya Samkhya Mimamsa Indian philosophy research paper", "general"),
+]
+
+# Informational counts only (not read elsewhere in the codebase) — how many
+# of the queries above are "news" vs "general"/research topic, kept for
+# maintainers tuning DISCOVERY_QUERIES.
+DISCOVERY_TARGET_NEWS = sum(1 for _, _, topic in DISCOVERY_QUERIES if topic == "news")
+DISCOVERY_TARGET_RESEARCH = sum(1 for _, _, topic in DISCOVERY_QUERIES if topic != "news")
+
+# Caps how many top deterministically-ranked candidates get an expensive
+# Groq editorial-review call, after discovery + quality filtering + memory
+# suppression. Tune down to cut API usage, up for a more thorough review pass.
+DISCOVERY_MAX_CANDIDATES_FOR_AI = 24
+
+
 
 
 # ==========================================================================
 # Historical research memory
 # ==========================================================================
 
-# Local persistent state; this is intentionally not an environment variable so
-# existing deployment configuration remains unchanged.
-MEMORY_FILE = "data/research_memory.json"
+# Informational only: services/memory_service.py resolves its own path
+# (<repo_root>/memory/research_memory.json, via `Path(__file__)`) rather than
+# reading this constant, so this value is not load-bearing. It is kept in
+# sync with the real location for documentation purposes only.
+MEMORY_FILE = "memory/research_memory.json"
 MEMORY_RETENTION_DAYS = 90
 
 # ==========================================================================
