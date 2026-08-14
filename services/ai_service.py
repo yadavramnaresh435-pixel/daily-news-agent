@@ -124,7 +124,11 @@ def build_user_prompt(category: Category, results: list[SearchResult]) -> str:
 
 
 def summarize_with_gemini(
-    client: GroqClient, category: Category, results: list[SearchResult]
+    client: GroqClient,
+    category: Category,
+    results: list[SearchResult],
+    editorial_reviews: dict[str, EditorialReview] | None = None,
+    historical_context: dict[str, list[dict]] | None = None,
 ) -> str:
     """
     Summarize one category's search results via the configured Groq
@@ -138,7 +142,23 @@ def summarize_with_gemini(
     if not results:
         return "No significant fresh updates found for this category today."
 
-    prompt = build_user_prompt(category, results)
+    lines = [f"Category: {category.name}", ""]
+    for i, r in enumerate(results, start=1):
+        lines.extend([f"Result {i}:", f"Title: {r.title}", f"URL: {r.url}", f"Snippet: {(r.content or '')[:1400]}"])
+        review = (editorial_reviews or {}).get(r.url)
+        if review is not None:
+            lines.append(
+                f"Editorial assessment: confidence={review.confidence:.0f}; research_value={review.research_value:.0f}; reason={review.reason}"
+            )
+        prior = (historical_context or {}).get(r.url, [])
+        if prior:
+            lines.append("Relevant historical context (use only if factually connected):")
+            for item in prior[:2]:
+                lines.append(
+                    f"- {item.get('reported_at','')}: {item.get('title','')} | topic={item.get('topic','')} | evidence={(item.get('content') or '')[:500]}"
+                )
+        lines.append("")
+    prompt = "\n".join(lines)
 
     try:
         return client.chat(system_instruction=SYSTEM_INSTRUCTION, user_prompt=prompt, temperature=0.4)
@@ -269,6 +289,118 @@ def review_article_with_groq(
     return review.decision, review.reason
 
 
+# ==========================================================================
+# Phase 6.0 — structured per-article content for hinduresearch.com
+#
+# The Telegram digest above is a single free-form HTML blob per category, so
+# it doesn't give the website structured per-article fields. This mirrors
+# the existing evaluate_article_with_groq pattern (one article in, one
+# strict-JSON object out) instead of inventing a new call style.
+# ==========================================================================
+
+@dataclass
+class WebsiteArticle:
+    """Structured, per-article content prepared for hinduresearch.com."""
+
+    title: str
+    summary: str
+    key_takeaways: list[str]
+    why_this_matters: str
+    research_hook: str
+
+
+WEBSITE_CONTENT_SYSTEM_INSTRUCTION = """\
+You are the research editor preparing ONE article for direct publication on
+the hinduresearch.com website (not Telegram). Using only the supplied title
+and source snippet, produce structured content for a serious, academic-
+leaning research portal covering Indian civilisation, Hindu history,
+archaeology, heritage, Sanskrit, manuscripts and ancient science.
+
+Return ONLY this JSON object, with no Markdown or extra text:
+{"title":"a clear factual website headline, rewritten not copied","summary":"2-3 sentence factual summary in your own words","key_takeaways":["fact 1","fact 2","fact 3"],"why_this_matters":"1-2 sentences on significance for Indian civilisation, heritage or historical research","research_hook":"a specific future hinduresearch.com research article angle"}
+
+Rules:
+- Use only facts supported by the supplied material. Never invent facts, dates, quotations or institutions.
+- key_takeaways must contain exactly 3 concise, non-duplicative facts.
+- Do not copy the source wording verbatim; rewrite everything in your own words.
+- Avoid promotional language, clickbait and generic statements.
+"""
+
+
+def _parse_website_content_response(response: str, fallback_title: str) -> WebsiteArticle:
+    """Parse strict JSON while tolerating a fenced JSON response from the model."""
+    raw = (response or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not match:
+            raise ValueError("Website content response did not contain a JSON object.")
+        data = json.loads(match.group(0))
+
+    if not isinstance(data, dict):
+        raise ValueError("Website content response JSON must be an object.")
+
+    title = str(data.get("title") or fallback_title).strip() or fallback_title
+    summary = str(data.get("summary") or "").strip()
+    takeaways_raw = data.get("key_takeaways")
+    key_takeaways = (
+        [str(x).strip() for x in takeaways_raw if str(x).strip()]
+        if isinstance(takeaways_raw, list)
+        else []
+    )
+    why_this_matters = str(data.get("why_this_matters") or "").strip()
+    research_hook = str(data.get("research_hook") or "").strip()
+    return WebsiteArticle(title, summary, key_takeaways[:3], why_this_matters, research_hook)
+
+
+def generate_website_content(
+    client: GroqClient,
+    category: Category,
+    result: SearchResult,
+    review: "EditorialReview | None" = None,
+) -> WebsiteArticle:
+    """Produce structured per-article website content for one selected result.
+
+    Best-effort and never raises: on any failure (network, parsing, empty
+    response) this falls back to a minimal but still publishable record
+    built directly from the source snippet, so one bad AI response can never
+    block website publishing.
+    """
+    prompt = (
+        f"Category: {category.name}\n"
+        f"Title: {result.title}\n"
+        f"URL: {result.url}\n"
+        f"Snippet: {(result.content or '')[:2200]}\n"
+    )
+    if review is not None:
+        prompt += (
+            f"Editorial notes: confidence={review.confidence:.0f}; "
+            f"research_value={review.research_value:.0f}; reason={review.reason}\n"
+        )
+    try:
+        response = client.chat(
+            system_instruction=WEBSITE_CONTENT_SYSTEM_INSTRUCTION,
+            user_prompt=prompt,
+            temperature=0.3,
+        )
+        return _parse_website_content_response(response, fallback_title=result.title)
+    except Exception as exc:  # noqa: BLE001 - one article must never block website publishing
+        log.warning("Website content generation failed for '%s': %s", result.title, exc)
+        snippet = (result.content or "").strip()
+        return WebsiteArticle(
+            title=result.title,
+            summary=snippet[:400] if snippet else "Summary unavailable.",
+            key_takeaways=[],
+            why_this_matters="",
+            research_hook="",
+        )
+
+
 RESEARCH_DIGEST_SYSTEM_INSTRUCTION = """\
 You are the senior research editor for hinduresearch.com, a serious, academic-leaning
 portal covering Indian civilisation, Hindu history, archaeology, heritage, Sanskrit,
@@ -297,12 +429,6 @@ Editorial rules:
 - Why This Matters must explain a concrete significance, not generic statements such as
   "this is important for preserving our heritage" without saying why.
 - Research Hook must resemble a real research article idea, not a generic topic or slogan.
-- When historical memory is supplied and genuinely related, add a short
-  <b>Historical Context</b> section explaining the connection to the earlier report.
-  If the evidence shows an evolving excavation, manuscript project, restoration,
-  inscription study or other ongoing subject, explicitly identify it as a
-  <b>Continuing Story</b>. Do not imply continuity when the supplied evidence does not support it.
-- Do not restate an earlier report as today's discovery. Focus on what is new today.
 - Future Research is optional. Use it for concrete next questions: related inscriptions,
   nearby archaeological sites, texts to compare, archives, datasets, conservation records,
   or unresolved historical questions.
@@ -323,13 +449,11 @@ def summarize_with_gemini(
     category: Category,
     results: list[SearchResult],
     editorial_reviews: dict[str, EditorialReview] | None = None,
-    historical_context: dict[str, list[dict]] | None = None,
 ) -> str:
     """Summarize shortlisted sources with the existing Groq client.
 
     The optional fourth argument is backward-compatible and lets Phase 3 pass
-    editorial evidence into the final writing prompt. The optional fifth
-    argument adds best-effort historical memory for Phase 4.
+    editorial evidence into the final writing prompt.
     """
     if not results:
         return "No significant fresh updates found for this category today."
@@ -349,19 +473,6 @@ def summarize_with_gemini(
                 f"Editorial assessment: {decision}; confidence={review.confidence:.0f}; "
                 f"research_value={review.research_value:.0f}; reason={review.reason}"
             )
-
-        prior_reports = (historical_context or {}).get(r.url, [])
-        if prior_reports:
-            lines.append("Historical memory / possible continuing story:")
-            for prior in prior_reports:
-                lines.append(
-                    f"- Previously reported: {prior.get('reported_at', '')}; "
-                    f"Topic: {prior.get('topic', '')}; Title: {prior.get('title', '')}; "
-                    f"URL: {prior.get('url', '')}"
-                )
-                lines.append(f"  Prior evidence: {(prior.get('content') or '')[:700]}")
-            lines.append("Use this only to explain a factual connection. Do not repeat the prior report as today's new finding.")
-
         lines.append("")
 
     try:
