@@ -677,14 +677,14 @@ def generate_digest(
 
     # AI review is deliberately capped globally, rather than being called for
     # every search result or every query.
-    reviewed_by_category: dict[str, list[tuple[SearchResult, object, EditorialReview]]] = {}
+    reviewed_by_category: dict[Category, list[tuple[SearchResult, object, EditorialReview]]] = {}
     for result, score_data, category in scored[:_EDITORIAL_SHORTLIST_TOTAL]:
         try:
             review = evaluate_article_with_groq(ai_client, category, result)
         except Exception as exc:  # noqa: BLE001
             log.warning("Editorial evaluation exception for '%s': %s", result.title, exc)
             review = EditorialReview(None, 0.0, 0.0, "Editorial evaluation unavailable.")
-        reviewed_by_category.setdefault(category.name, []).append((result, score_data, review))
+        reviewed_by_category.setdefault(category, []).append((result, score_data, review))
         if review.decision is False:
             stats["editorial_rejected"] += 1
         elif review.decision is None:
@@ -790,9 +790,11 @@ def main() -> None:
 
     telegram_sent = False
     try:
-        deliver_digest(settings.telegram_bot_token, settings.telegram_chat_id, full_message)
-        log.info("Telegram message sent successfully")
-        telegram_sent = True
+        telegram_sent = deliver_digest(settings.telegram_bot_token, settings.telegram_chat_id, full_message)
+        if telegram_sent:
+            log.info("Telegram message sent successfully")
+        else:
+            log.error("Telegram delivery failed: one or more message chunks were not sent.")
     except Exception as exc:  # noqa: BLE001
         log.error("Telegram delivery failed: %s", exc)
 
