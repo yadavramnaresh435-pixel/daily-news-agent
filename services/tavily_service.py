@@ -22,6 +22,8 @@ class SearchResult:
     title: str
     url: str
     content: str
+    # Optional news metadata; default keeps existing constructors compatible.
+    published_date: str | None = None
 
 
 def run_tavily_search(client: TavilyClient, category: Category) -> list[SearchResult]:
@@ -53,7 +55,17 @@ def run_tavily_search(client: TavilyClient, category: Category) -> list[SearchRe
         content = (item.get("content") or "").strip()
         if not url:
             continue  # a bullet without a verifiable source link is useless here
-        results.append(SearchResult(title=title, url=url, content=content))
+        published_date = item.get("published_date") or item.get("published_at")
+        if published_date is not None:
+            published_date = str(published_date).strip() or None
+        results.append(
+            SearchResult(
+                title=title,
+                url=url,
+                content=content,
+                published_date=published_date,
+            )
+        )
 
     log.info("Tavily: %d usable result(s) for '%s'.", len(results), category.name)
     return results
