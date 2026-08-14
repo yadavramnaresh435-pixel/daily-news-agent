@@ -208,3 +208,20 @@ WEBSITE_DEFAULT_DATA_PATH = "data/articles.json"
 WEBSITE_DEFAULT_COMMIT_NAME = "Hindu Research Agent"
 WEBSITE_DEFAULT_COMMIT_EMAIL = "actions@users.noreply.github.com"
 WEBSITE_SAME_STORY_SIMILARITY = 0.88  # same threshold style as memory_service dedupe
+
+# ===========================================================================
+# Website publishing — Phase 6.1B static news artifacts
+# ===========================================================================
+# These are safe defaults. Repository/token remain runtime secrets and are
+# intentionally read from environment variables in services/website_service.py.
+WEBSITE_DEFAULT_BASE_URL = "https://hinduresearch.com"
+WEBSITE_DEFAULT_LATEST_PATH = "data/latest.json"
+WEBSITE_DEFAULT_MANIFEST_PATH = "data/manifest.json"
+WEBSITE_DEFAULT_ARCHIVE_DIR = "data/archive"
+WEBSITE_DEFAULT_ARTICLE_DIR = "news/articles"
+WEBSITE_DEFAULT_NEWS_INDEX_PATH = "news/index.html"
+WEBSITE_DEFAULT_FEED_PATH = "feed/rss.xml"
+WEBSITE_DEFAULT_NEWS_SITEMAP_PATH = "sitemap-news.xml"
+WEBSITE_DEFAULT_LATEST_LIMIT = 50
+WEBSITE_DEFAULT_RSS_LIMIT = 50
+WEBSITE_DEFAULT_SITEMAP_LIMIT = 1000
