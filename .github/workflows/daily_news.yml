@@ -21,3 +21,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # Phase 6.0 — Cross Repository Integration (optional).
+          # If WEBSITE_REPO / WEBSITE_REPO_TOKEN are not set, website
+          # publishing is skipped automatically and the rest of the run
+          # (Telegram, memory) is unaffected.
+          WEBSITE_REPO: ${{ secrets.WEBSITE_REPO }}
+          WEBSITE_REPO_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          WEBSITE_REPO_BRANCH: ${{ secrets.WEBSITE_REPO_BRANCH }}
