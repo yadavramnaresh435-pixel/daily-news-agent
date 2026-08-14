@@ -1,8 +1,8 @@
 """Static HTML/feed renderer for the Hindu Research Portal news system.
 
-This module deliberately contains no AI or network logic. It reads reusable
-HTML templates from the target website repository and fills them with already
-validated structured article data.
+No AI or network logic lives here. Structured article records are rendered into
+one HTML page containing English and Hindi content; JavaScript selects the
+visible language instantly and persists the user's preference.
 """
 from __future__ import annotations
 
@@ -41,14 +41,13 @@ def ensure_slug(article: dict[str, Any]) -> str:
 def _iso_date(value: Any) -> str:
     raw = _text(value)
     if not raw:
-        return datetime.now(timezone.utc).date().isoformat()
+        return datetime.now(timezone.utc).isoformat()
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).isoformat()
     except ValueError:
-        # Existing Phase 6.0 records commonly use YYYY-MM-DD.
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
             return raw + "T00:00:00+00:00"
         return datetime.now(timezone.utc).isoformat()
@@ -84,6 +83,28 @@ def _description(article: dict[str, Any]) -> str:
 
 def _source_name(article: dict[str, Any]) -> str:
     return _text(article.get("source")) or "Source"
+
+
+def _language_payload(article: dict[str, Any], lang: str) -> dict[str, Any]:
+    """Return a complete language payload, falling back safely to English fields."""
+    translations = article.get("translations")
+    if isinstance(translations, dict):
+        candidate = translations.get(lang)
+        if isinstance(candidate, dict):
+            return {
+                "title": _text(candidate.get("title")) or _text(article.get("title")),
+                "summary": _text(candidate.get("summary")) or _text(article.get("summary")),
+                "key_takeaways": candidate.get("key_takeaways") if isinstance(candidate.get("key_takeaways"), list) else list(article.get("key_takeaways") or []),
+                "why_this_matters": _text(candidate.get("why_this_matters")) or _text(article.get("why_this_matters")),
+                "research_hook": _text(candidate.get("research_hook")) or _text(article.get("research_hook")),
+            }
+    return {
+        "title": _text(article.get("title")),
+        "summary": _text(article.get("summary")),
+        "key_takeaways": list(article.get("key_takeaways") or []),
+        "why_this_matters": _text(article.get("why_this_matters")),
+        "research_hook": _text(article.get("research_hook")),
+    }
 
 
 def _takeaways_html(items: Any) -> str:
@@ -131,6 +152,20 @@ def _breadcrumb_json_ld(base_url: str, article: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+def _language_section(lang: str, payload: dict[str, Any]) -> str:
+    label = "en" if lang == "en" else "hi"
+    return (
+        f'<div data-lang="{label}">'
+        f'<h1>{_escape(payload["title"])}</h1>'
+        f'<p class="lead">{_escape(payload["summary"])}</p>'
+        f'<section class="research-box"><h2>{"Research Brief" if lang == "en" else "रिसर्च ब्रीफ़"}</h2><p>{_escape(payload["summary"])}</p></section>'
+        f'<section><h2>{"Key Takeaways" if lang == "en" else "मुख्य बातें"}</h2>{_takeaways_html(payload["key_takeaways"])}</section>'
+        f'<section><h2>{"Why This Matters" if lang == "en" else "यह क्यों महत्वपूर्ण है"}</h2><p>{_escape(payload["why_this_matters"])}</p></section>'
+        f'<section><h2>{"Research Hook" if lang == "en" else "रिसर्च हुक"}</h2><p>{_escape(payload["research_hook"])}</p></section>'
+        '</div>'
+    )
+
+
 def render_article(template: str, article: dict[str, Any], base_url: str) -> str:
     canonical = canonical_url(base_url, article)
     source_url = _text(article.get("source_url"))
@@ -147,6 +182,8 @@ def render_article(template: str, article: dict[str, Any], base_url: str) -> str
         modified_dt = published_dt
     modified_display = modified_dt.strftime("%d %B %Y")
 
+    en = _language_payload(article, "en")
+    hi = _language_payload(article, "hi")
     values = {
         "SEO_TITLE": _escape(_text(article.get("title")) + " | Hindu Research Portal"),
         "META_DESCRIPTION": _escape(_description(article)),
@@ -156,14 +193,11 @@ def render_article(template: str, article: dict[str, Any], base_url: str) -> str
         "MODIFIED_ISO": _escape(modified_iso),
         "ARTICLE_JSON_LD": _article_json_ld(base_url, article, image_url),
         "BREADCRUMB_JSON_LD": _breadcrumb_json_ld(base_url, article),
-        "TITLE": _escape(article.get("title")),
-        "SUMMARY": _escape(article.get("summary")),
+        "EN_CONTENT": _language_section("en", en),
+        "HI_CONTENT": _language_section("hi", hi),
         "CATEGORY": _escape(article.get("category")),
         "SOURCE_DOMAIN": _escape(source_domain),
         "SOURCE_URL": _escape(source_url),
-        "KEY_TAKEAWAYS_HTML": _takeaways_html(article.get("key_takeaways")),
-        "WHY_THIS_MATTERS": _escape(article.get("why_this_matters")),
-        "RESEARCH_HOOK": _escape(article.get("research_hook")),
         "PUBLISHED_DISPLAY": _escape(published_display),
         "MODIFIED_DISPLAY": _escape(modified_display),
         "ARTICLE_PATH": _escape(article_path(article)),
@@ -179,20 +213,27 @@ def render_index(template: str, articles: list[dict[str, Any]], years: list[tupl
     for article in articles:
         url = canonical_url(base_url, article)
         date_display = article_date(article).strftime("%d %b %Y")
+        en = _language_payload(article, "en")
+        hi = _language_payload(article, "hi")
         cards.append(
             '<article class="news-card">'
             f'<div class="news-card-meta"><span>{_escape(article.get("category"))}</span><time datetime="{_escape(_iso_date(article.get("first_published") or article.get("date")))}">{_escape(date_display)}</time></div>'
-            f'<h2><a href="{_escape(url)}">{_escape(article.get("title"))}</a></h2>'
-            f'<p>{_escape(_description(article))}</p>'
+            '<div data-lang="en">'
+            f'<h2><a href="{_escape(url)}">{_escape(en["title"])}</a></h2>'
+            f'<p>{_escape(_description({"summary": en["summary"]}))}</p>'
             f'<a class="read-more" href="{_escape(url)}">Read research brief →</a>'
+            '</div>'
+            '<div data-lang="hi">'
+            f'<h2><a href="{_escape(url)}">{_escape(hi["title"])}</a></h2>'
+            f'<p>{_escape(_description({"summary": hi["summary"]}))}</p>'
+            f'<a class="read-more" href="{_escape(url)}">रिसर्च ब्रीफ़ पढ़ें →</a>'
+            '</div>'
             '</article>'
         )
 
     archive_links = []
     for year, count in sorted(years, reverse=True):
-        archive_links.append(
-            f'<a href="{base_url.rstrip("/")}/data/archive/{year}.json">{year} <span>{count}</span></a>'
-        )
+        archive_links.append(f'<a href="{base_url.rstrip("/")}/data/archive/{year}.json">{year} <span>{count}</span></a>')
 
     values = {
         "GENERATED_AT": _escape(generated_at),

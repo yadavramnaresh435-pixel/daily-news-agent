@@ -133,6 +133,15 @@ def build_website_record(
 
     article_id = _article_id(result.url)
     source_published_at = getattr(result, "published_date", None)
+    english_payload = {
+        "title": title,
+        "summary": summary,
+        "key_takeaways": list(key_takeaways),
+        "why_this_matters": why_this_matters,
+        "research_hook": research_hook,
+    }
+    translations = dict(getattr(content, "translations", {}) or {}) if content is not None else {}
+    translations.setdefault("en", english_payload)
     return {
         "id": article_id,
         "slug": _slugify(title, article_id),
@@ -151,6 +160,8 @@ def build_website_record(
         "schema_version": SCHEMA_VERSION,
         "language": "en",
         "image_url": None,
+        # Additive multilingual extension; all original Phase 6.0 fields remain intact.
+        "translations": translations,
     }
 
 

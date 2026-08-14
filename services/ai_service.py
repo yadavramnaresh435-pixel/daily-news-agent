@@ -250,13 +250,20 @@ def review_article_with_groq(
 
 @dataclass
 class WebsiteArticle:
-    """Structured, per-article content prepared for hinduresearch.com."""
+    """Structured website content with an extensible multilingual payload.
+
+    The original English fields remain unchanged for Phase 6.0 compatibility.
+    ``translations`` is an additive extension keyed by BCP-47 language code
+    (currently ``en`` and ``hi``), so future languages can be added without
+    changing the article schema shape again.
+    """
 
     title: str
     summary: str
     key_takeaways: list[str]
     why_this_matters: str
     research_hook: str
+    translations: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 WEBSITE_CONTENT_SYSTEM_INSTRUCTION = """\
@@ -308,18 +315,109 @@ def _parse_website_content_response(response: str, fallback_title: str) -> Websi
     return WebsiteArticle(title, summary, key_takeaways[:3], why_this_matters, research_hook)
 
 
+HINDI_TRANSLATION_SYSTEM_INSTRUCTION = """\
+You are the Hindi-language editor for hinduresearch.com.
+Translate the supplied English research brief into clear, natural, high-quality
+modern Hindi suitable for a serious research portal. Preserve factual meaning,
+names, dates, institutions, titles of works, URLs and technical terminology.
+Do not add facts, interpretation, claims or citations that are absent from the
+English source. Use Devanagari for normal Hindi prose, while retaining
+well-established proper nouns or technical terms in their standard English/Sanskrit
+form where that improves clarity.
+
+Return ONLY this JSON object, with no Markdown or extra text:
+{"title":"Hindi title","summary":"Hindi summary","key_takeaways":["Hindi fact 1","Hindi fact 2","Hindi fact 3"],"why_this_matters":"Hindi significance","research_hook":"Hindi research angle"}
+
+Rules:
+- Translate meaning, not word-for-word syntax.
+- Keep exactly 3 concise key takeaways when the English source has 3.
+- Do not invent or omit factual qualifiers.
+- Keep the tone neutral, scholarly and readable.
+"""
+
+
+def _parse_translation_response(response: str) -> dict[str, object]:
+    raw = (response or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not match:
+            raise ValueError("Hindi translation response did not contain a JSON object.")
+        data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise ValueError("Hindi translation response JSON must be an object.")
+
+    def clean_text(key: str) -> str:
+        return str(data.get(key) or "").strip()
+
+    takeaways_raw = data.get("key_takeaways")
+    takeaways = (
+        [str(x).strip() for x in takeaways_raw if str(x).strip()]
+        if isinstance(takeaways_raw, list) else []
+    )
+    return {
+        "title": clean_text("title"),
+        "summary": clean_text("summary"),
+        "key_takeaways": takeaways[:3],
+        "why_this_matters": clean_text("why_this_matters"),
+        "research_hook": clean_text("research_hook"),
+    }
+
+
+def translate_website_content_to_hindi(client: GroqClient, content: WebsiteArticle) -> WebsiteArticle:
+    """Translate an already-generated English brief with the same Groq model.
+
+    This deliberately reuses the English result instead of asking the model to
+    independently author a second article, keeping both language versions
+    factually aligned. On failure, English remains available and the caller can
+    publish a safe fallback rather than breaking the workflow.
+    """
+    source = {
+        "title": content.title,
+        "summary": content.summary,
+        "key_takeaways": content.key_takeaways,
+        "why_this_matters": content.why_this_matters,
+        "research_hook": content.research_hook,
+    }
+    try:
+        response = client.chat(
+            system_instruction=HINDI_TRANSLATION_SYSTEM_INSTRUCTION,
+            user_prompt=json.dumps(source, ensure_ascii=False),
+            temperature=0.2,
+        )
+        hindi = _parse_translation_response(response)
+        required = ("title", "summary", "why_this_matters", "research_hook")
+        if any(not str(hindi.get(key) or "").strip() for key in required):
+            raise ValueError("Hindi translation omitted one or more required fields.")
+        if len(hindi.get("key_takeaways", [])) < min(3, len(content.key_takeaways)):
+            raise ValueError("Hindi translation omitted required key takeaways.")
+        content.translations["hi"] = hindi
+    except Exception as exc:  # noqa: BLE001 - translation is additive and non-fatal
+        log.warning("Hindi translation failed for website article '%s': %s", content.title, exc)
+    content.translations["en"] = {
+        "title": content.title,
+        "summary": content.summary,
+        "key_takeaways": list(content.key_takeaways),
+        "why_this_matters": content.why_this_matters,
+        "research_hook": content.research_hook,
+    }
+    return content
+
+
 def generate_website_content(
     client: GroqClient,
     category: Category,
     result: SearchResult,
     review: "EditorialReview | None" = None,
 ) -> WebsiteArticle:
-    """Produce structured per-article website content for one selected result.
+    """Generate English once, then translate that exact brief into Hindi.
 
-    Best-effort and never raises: on any failure (network, parsing, empty
-    response) this falls back to a minimal but still publishable record
-    built directly from the source snippet, so one bad AI response can never
-    block website publishing.
+    AI remains responsible only for structured content. HTML is still rendered
+    deterministically from templates by the website publisher.
     """
     prompt = (
         f"Category: {category.name}\n"
@@ -338,17 +436,27 @@ def generate_website_content(
             user_prompt=prompt,
             temperature=0.3,
         )
-        return _parse_website_content_response(response, fallback_title=result.title)
+        content = _parse_website_content_response(response, fallback_title=result.title)
+        return translate_website_content_to_hindi(client, content)
     except Exception as exc:  # noqa: BLE001 - one article must never block website publishing
         log.warning("Website content generation failed for '%s': %s", result.title, exc)
         snippet = (result.content or "").strip()
-        return WebsiteArticle(
+        content = WebsiteArticle(
             title=result.title,
             summary=snippet[:400] if snippet else "Summary unavailable.",
             key_takeaways=[],
             why_this_matters="",
             research_hook="",
         )
+        # Preserve a valid English payload even when AI generation itself fails.
+        content.translations["en"] = {
+            "title": content.title,
+            "summary": content.summary,
+            "key_takeaways": [],
+            "why_this_matters": "",
+            "research_hook": "",
+        }
+        return content
 
 
 RESEARCH_DIGEST_SYSTEM_INSTRUCTION = """\
