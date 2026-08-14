@@ -11,16 +11,21 @@ Groq summarization.
 
 from __future__ import annotations
 
-import json
-import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from urllib.parse import urlparse
 
 from tavily import TavilyClient
 
-from config.constants import CATEGORIES, MEMORY_FILE, MEMORY_RETENTION_DAYS
+from config.constants import (
+    CATEGORIES,
+    DISCOVERY_QUERIES,
+    DISCOVERY_TARGET_NEWS,
+    DISCOVERY_TARGET_RESEARCH,
+    DISCOVERY_MAX_CANDIDATES_FOR_AI,
+    Category,
+)
 from config.settings import load_settings
 from services.ai_service import (
     CategoryDigest,
@@ -29,9 +34,18 @@ from services.ai_service import (
     EditorialReview,
     evaluate_article_with_groq,
     summarize_with_gemini,
+    generate_website_content,
 )
 from services.tavily_service import SearchResult, run_tavily_search
+from services.memory_service import (
+    load_memory,
+    filter_historical_duplicates,
+    build_historical_context,
+    update_memory,
+    archive_selected,
+)
 from services.telegram_service import deliver_digest
+from services.website_service import build_website_record, publish_to_website
 from utils.logger import get_logger
 
 log = get_logger()
@@ -50,6 +64,10 @@ _MIN_CONTENT_LENGTH = 20
 _FINAL_MAX_ARTICLES = 8
 _MAX_PER_CATEGORY = 3
 _EDITORIAL_SHORTLIST_PER_CATEGORY = 4
+
+# Phase 5: AI sees only the strongest globally ranked candidates after discovery,
+# deterministic quality filtering, cross-source merging, and memory suppression.
+_EDITORIAL_SHORTLIST_TOTAL = DISCOVERY_MAX_CANDIDATES_FOR_AI
 
 # Strong relevance signals. Matching is intentionally broad enough to preserve
 # legitimate small research organisations and less famous institutions.
@@ -131,217 +149,6 @@ _HIGH_CREDIBILITY_DOMAINS = {
     "nationalarchives.nic.in", "culture.gov.in", "education.gov.in",
     "pib.gov.in", "sahitya-akademi.gov.in",
 }
-
-
-
-# ---------------------------------------------------------------------------
-# Lightweight historical memory
-# ---------------------------------------------------------------------------
-# Memory is deliberately file-based so the existing architecture, environment
-# variables, and service interfaces remain unchanged. Any memory failure is
-# non-fatal: the agent simply behaves like the previous daily workflow.
-_MEMORY_VERSION = 1
-_MEMORY_MAX_ENTRIES = 500
-
-
-def _memory_path() -> str:
-    return MEMORY_FILE
-
-
-def _load_memory() -> dict:
-    try:
-        with open(_memory_path(), "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        if not isinstance(data, dict):
-            return {"version": _MEMORY_VERSION, "entries": []}
-        entries = data.get("entries")
-        if not isinstance(entries, list):
-            entries = []
-        return {"version": data.get("version", _MEMORY_VERSION), "entries": entries}
-    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        log.warning("Historical memory unavailable; continuing without it: %s", exc)
-        return {"version": _MEMORY_VERSION, "entries": []}
-    except Exception as exc:  # noqa: BLE001 - memory must never break a run
-        log.warning("Unexpected historical memory load failure: %s", exc)
-        return {"version": _MEMORY_VERSION, "entries": []}
-
-
-def _save_memory(memory: dict) -> None:
-    try:
-        directory = os.path.dirname(_memory_path())
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        temp_path = f"{_memory_path()}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            json.dump(memory, handle, ensure_ascii=False, indent=2)
-        os.replace(temp_path, _memory_path())
-    except Exception as exc:  # noqa: BLE001 - memory persistence is best-effort
-        log.warning("Could not save historical memory; run will still complete: %s", exc)
-        try:
-            if os.path.exists(f"{_memory_path()}.tmp"):
-                os.remove(f"{_memory_path()}.tmp")
-        except OSError:
-            pass
-
-
-def _memory_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return None
-
-
-def _content_similarity(a: str, b: str) -> float:
-    a_norm = _normalize_text(a)
-    b_norm = _normalize_text(b)
-    if not a_norm or not b_norm:
-        return 0.0
-    return SequenceMatcher(None, a_norm, b_norm).ratio()
-
-
-def _memory_match(result: SearchResult, entry: dict) -> bool:
-    """Return True only for a near-duplicate, not merely a related topic."""
-    old_url = str(entry.get("url") or "").strip().lower()
-    new_url = (result.url or "").strip().lower()
-    if old_url and new_url and old_url == new_url:
-        old_content = str(entry.get("content") or "")
-        # A changed page is allowed through when its supplied material is
-        # materially different; this is the significant-update escape hatch.
-        if old_content and _content_similarity(result.content, old_content) < 0.78:
-            return False
-        return True
-
-    old_title = str(entry.get("title") or "")
-    old_content = str(entry.get("content") or "")
-    if not old_title:
-        return False
-    title_similarity = SequenceMatcher(
-        None, _normalize_text(result.title), _normalize_text(old_title)
-    ).ratio()
-    token_a, token_b = _title_tokens(result.title), _title_tokens(old_title)
-    overlap = len(token_a & token_b) / max(1, min(len(token_a), len(token_b)))
-    content_similarity = _content_similarity(result.content, old_content)
-
-    # Require strong title/story evidence before suppressing a result.
-    return (
-        (title_similarity >= 0.90 or overlap >= 0.88)
-        and content_similarity >= 0.70
-    )
-
-
-def _prune_memory(memory: dict) -> dict:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=MEMORY_RETENTION_DAYS)
-    kept = []
-    for entry in memory.get("entries", []):
-        try:
-            when = _memory_datetime(entry.get("reported_at"))
-            if when is None or when >= cutoff:
-                kept.append(entry)
-        except Exception:
-            continue
-    memory["entries"] = kept[-_MEMORY_MAX_ENTRIES:]
-    memory["version"] = _MEMORY_VERSION
-    return memory
-
-
-def _historical_context(result: SearchResult, memory: dict) -> list[dict]:
-    """Find related prior reports for context/continuity without suppressing them."""
-    related = []
-    current_topic = _topic_for_result(result)
-    for entry in memory.get("entries", []):
-        try:
-            when = _memory_datetime(entry.get("reported_at"))
-            if when is None:
-                continue
-            title = str(entry.get("title") or "")
-            content = str(entry.get("content") or "")
-            title_similarity = SequenceMatcher(
-                None, _normalize_text(result.title), _normalize_text(title)
-            ).ratio() if title else 0.0
-            token_a, token_b = _title_tokens(result.title), _title_tokens(title)
-            overlap = len(token_a & token_b) / max(1, min(len(token_a), len(token_b)))
-            same_topic = str(entry.get("topic") or "") == current_topic
-            content_similarity = _content_similarity(result.content, content)
-            if title_similarity >= 0.55 or overlap >= 0.50 or (same_topic and content_similarity >= 0.35):
-                related.append({
-                    "reported_at": when.isoformat(),
-                    "title": title,
-                    "url": str(entry.get("url") or ""),
-                    "topic": str(entry.get("topic") or current_topic),
-                    "content": content[:900],
-                })
-        except Exception:
-            continue
-
-    related.sort(key=lambda item: item["reported_at"], reverse=True)
-    return related[:3]
-
-
-def _apply_historical_memory(
-    results_by_category: dict[str, list[SearchResult]], memory: dict
-) -> tuple[dict[str, list[SearchResult]], dict[str, list[dict]], int]:
-    """Suppress only near-duplicates and collect context for continuing stories."""
-    filtered: dict[str, list[SearchResult]] = {}
-    context: dict[str, list[dict]] = {}
-    suppressed = 0
-    entries = memory.get("entries", [])
-
-    for category_name, results in results_by_category.items():
-        kept = []
-        for result in results:
-            try:
-                matches = [entry for entry in entries if _memory_match(result, entry)]
-                if matches:
-                    # A near-duplicate is suppressed. The most recent matching
-                    # entry is still available as historical memory for future runs.
-                    suppressed += 1
-                    continue
-                related = _historical_context(result, memory)
-                if related:
-                    context[result.url] = related
-                kept.append(result)
-            except Exception as exc:
-                log.warning("Memory comparison failed for '%s': %s", result.title, exc)
-                kept.append(result)
-        filtered[category_name] = kept
-
-    return filtered, context, suppressed
-
-
-def _record_memory(
-    memory: dict,
-    selected_by_category: dict[str, list[SearchResult]],
-    historical_context: dict[str, list[dict]],
-) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    entries = memory.setdefault("entries", [])
-    existing_urls = {str(item.get("url") or "").strip().lower() for item in entries}
-
-    for category_name, results in selected_by_category.items():
-        for result in results:
-            url_key = (result.url or "").strip().lower()
-            # Do not duplicate an entry when multiple categories surface the same URL.
-            if url_key and url_key in existing_urls:
-                continue
-            topic = _topic_for_result(result)
-            related = historical_context.get(result.url, [])
-            entries.append({
-                "reported_at": now,
-                "category": category_name,
-                "topic": topic,
-                "title": result.title,
-                "url": result.url,
-                "content": (result.content or "")[:1800],
-                "historical_context_urls": [item["url"] for item in related if item.get("url")],
-            })
-            if url_key:
-                existing_urls.add(url_key)
-
-    _prune_memory(memory)
-    _save_memory(memory)
 
 
 def _is_meaningful_result(result: SearchResult) -> bool:
@@ -770,17 +577,38 @@ def _build_snippet_fallback(results: list[SearchResult]) -> str:
     return "⚠️ AI summary unavailable — showing raw snippets:\n\n" + "\n\n".join(blocks)
 
 
+def _category_for_result(result: SearchResult) -> Category:
+    """Map a broad discovery result back to the existing digest taxonomy."""
+    topic = _topic_for_result(result)
+    if topic in {"Archaeology", "Temple Conservation"}:
+        return CATEGORIES[0]
+    if topic in {"Manuscripts", "Indian Philosophy"}:
+        return CATEGORIES[1]
+    if topic in {"Museums", "Culture"}:
+        return CATEGORIES[2]
+    return CATEGORIES[3]
+
+
+def _global_dedupe(results: list[SearchResult]) -> tuple[list[SearchResult], int]:
+    """Merge same-event coverage and remove exact/near duplicate reports globally."""
+    merged = _merge_related_sources(results)
+    return _dedupe_results(merged)
+
+
 def generate_digest(
     tavily_client: TavilyClient, ai_client: GroqClient
-) -> tuple[list[CategoryDigest], dict[str, int]]:
-    """Search, score, review, diversify, then summarize using existing interfaces."""
+) -> tuple[list[CategoryDigest], dict[str, int], list[dict]]:
+    """Discover broadly, filter locally, then spend AI calls only on top candidates."""
     digests: list[CategoryDigest] = []
     stats = {
         "found": 0,
+        "discovery_news": 0,
+        "discovery_research": 0,
         "skipped_empty": 0,
         "duplicates_removed": 0,
         "quality_rejected": 0,
         "after_filtering": 0,
+        "memory_suppressed": 0,
         "editorial_rejected": 0,
         "editorial_failures": 0,
         "low_confidence_rejected": 0,
@@ -788,84 +616,95 @@ def generate_digest(
         "final_selected": 0,
         "ai_summaries_generated": 0,
         "fallback_summaries_used": 0,
-        "memory_suppressed": 0,
     }
 
-    reviewed_by_category = []
+    memory = load_memory()
+    all_results: list[SearchResult] = []
 
-    for category in CATEGORIES:
-        digest = CategoryDigest(category=category)
+    # Large discovery pool: multiple focused queries, split between news and
+    # scholarly/general research. A failed query contributes zero but never
+    # interrupts the rest of the discovery pass.
+    for category_name, query, topic in DISCOVERY_QUERIES:
+        category = next((c for c in CATEGORIES if c.name == category_name), CATEGORIES[0])
         try:
-            raw_results = run_tavily_search(tavily_client, category)
+            raw_results = run_tavily_search(tavily_client, category, topic=topic, query=query)
             stats["found"] += len(raw_results)
-
-            meaningful, skipped_empty = _filter_meaningful_results(raw_results, category.name)
-            stats["skipped_empty"] += skipped_empty
-
-            merged_results = _merge_related_sources(meaningful)
-            deduped, duplicates_removed = _dedupe_results(merged_results)
-            stats["duplicates_removed"] += duplicates_removed
-
-            quality_results = []
-            for result in deduped:
-                try:
-                    if _quality_gate(result, category.name):
-                        quality_results.append(result)
-                    else:
-                        stats["quality_rejected"] += 1
-                except Exception as exc:  # noqa: BLE001
-                    stats["quality_rejected"] += 1
-                    log.warning("Scoring failed for '%s': %s", result.title, exc)
-
-            stats["after_filtering"] += len(quality_results)
-
-            scored = []
-            for result in quality_results:
-                try:
-                    scored.append((result, _deterministic_score(result, category.name)))
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Ranking failed for '%s': %s", result.title, exc)
-
-            scored.sort(
-                key=lambda item: (
-                    float(item[1]["base"]),
-                    float(item[1]["freshness"]),
-                    float(item[1]["credibility"]),
-                ),
-                reverse=True,
-            )
-
-            reviewed = _apply_editorial_reviews(scored, ai_client, category)
-            stats["editorial_rejected"] += sum(1 for _, _, review in reviewed if review.decision is False)
-            stats["editorial_failures"] += sum(1 for _, _, review in reviewed if review.decision is None)
-            stats["low_confidence_rejected"] += sum(
-                1 for _, _, review in reviewed
-                if review.decision is True and review.confidence < 35.0
-            )
-            stats["ai_research_value"] += sum(
-                int(round(review.research_value)) for _, _, review in reviewed
-            )
-            reviewed_by_category.append((category, reviewed))
+            stats["discovery_news" if topic == "news" else "discovery_research"] += len(raw_results)
+            all_results.extend(raw_results)
         except Exception as exc:  # noqa: BLE001
-            log.error("Unexpected failure processing '%s': %s", category.name, exc)
-            reviewed_by_category.append((category, []))
+            log.warning("Discovery query failed: %s", exc)
 
-    selected_by_category, selected_reviews, selected_count = _finalize_ranked_results(reviewed_by_category)
+    meaningful, skipped_empty = _filter_meaningful_results(all_results, "Phase 5 discovery")
+    stats["skipped_empty"] += skipped_empty
 
-    # Historical memory is applied after editorial ranking so only genuinely
-    # publishable candidates are compared against prior published reports.
-    memory = _prune_memory(_load_memory())
-    selected_by_category, historical_context, memory_suppressed = _apply_historical_memory(
-        selected_by_category, memory
+    merged_deduped, duplicates_removed = _global_dedupe(meaningful)
+    stats["duplicates_removed"] += duplicates_removed
+
+    # Cross-day memory filtering happens before any AI call.
+    historical_fresh, suppressed = filter_historical_duplicates(merged_deduped, memory)
+    stats["memory_suppressed"] = suppressed
+
+    quality_results: list[SearchResult] = []
+    for result in historical_fresh:
+        try:
+            category = _category_for_result(result)
+            if _quality_gate(result, category.name):
+                quality_results.append(result)
+            else:
+                stats["quality_rejected"] += 1
+        except Exception as exc:  # noqa: BLE001
+            stats["quality_rejected"] += 1
+            log.warning("Quality scoring failed for '%s': %s", result.title, exc)
+
+    stats["after_filtering"] = len(quality_results)
+
+    scored: list[tuple[SearchResult, dict[str, float | str], Category]] = []
+    for result in quality_results:
+        try:
+            category = _category_for_result(result)
+            scored.append((result, _deterministic_score(result, category.name), category))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Ranking failed for '%s': %s", result.title, exc)
+
+    scored.sort(
+        key=lambda item: (
+            float(item[1]["base"]),
+            float(item[1]["freshness"]),
+            float(item[1]["credibility"]),
+        ),
+        reverse=True,
     )
-    stats["memory_suppressed"] = memory_suppressed
-    stats["final_selected"] = sum(len(items) for items in selected_by_category.values())
+
+    # AI review is deliberately capped globally, rather than being called for
+    # every search result or every query.
+    reviewed_by_category: dict[str, list[tuple[SearchResult, object, EditorialReview]]] = {}
+    for result, score_data, category in scored[:_EDITORIAL_SHORTLIST_TOTAL]:
+        try:
+            review = evaluate_article_with_groq(ai_client, category, result)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Editorial evaluation exception for '%s': %s", result.title, exc)
+            review = EditorialReview(None, 0.0, 0.0, "Editorial evaluation unavailable.")
+        reviewed_by_category.setdefault(category.name, []).append((result, score_data, review))
+        if review.decision is False:
+            stats["editorial_rejected"] += 1
+        elif review.decision is None:
+            stats["editorial_failures"] += 1
+        elif review.confidence < 35.0:
+            stats["low_confidence_rejected"] += 1
+        stats["ai_research_value"] += int(round(review.research_value))
+
+    reviewed_list = [(c, items) for c, items in reviewed_by_category.items()]
+    selected_by_category, selected_reviews, selected_count = _finalize_ranked_results(reviewed_list)
+    stats["final_selected"] = selected_count
+
+    selected_results = [r for values in selected_by_category.values() for r in values]
+    historical_context = build_historical_context(selected_results, memory)
 
     for category in CATEGORIES:
         digest = CategoryDigest(category=category)
         digest.results = selected_by_category.get(category.name, [])
-
         try:
+            # The optional arguments are backward-compatible with the existing AI API.
             summary = summarize_with_gemini(
                 ai_client,
                 category,
@@ -879,16 +718,44 @@ def generate_digest(
             else:
                 stats["ai_summaries_generated"] += 1
             digest.summary_html = summary
+        except TypeError:
+            # Compatibility guard if an older ai_service.py is deployed accidentally.
+            try:
+                summary = summarize_with_gemini(ai_client, category, digest.results)
+                digest.summary_html = summary if not summary.startswith(_AI_FAILURE_MARKER) else _build_snippet_fallback(digest.results)
+                stats["fallback_summaries_used"] += int(summary.startswith(_AI_FAILURE_MARKER))
+                stats["ai_summaries_generated"] += int(not summary.startswith(_AI_FAILURE_MARKER))
+            except Exception as exc:  # noqa: BLE001
+                log.error("Unexpected summarization failure for '%s': %s", category.name, exc)
+                digest.error = str(exc)
+                digest.summary_html = _build_snippet_fallback(digest.results)
         except Exception as exc:  # noqa: BLE001
             log.error("Unexpected summarization failure for '%s': %s", category.name, exc)
             digest.error = str(exc)
             digest.summary_html = _build_snippet_fallback(digest.results)
-
         digests.append(digest)
 
-    _record_memory(memory, selected_by_category, historical_context)
-    return digests, stats
+    # Phase 6.0: build structured per-article records for hinduresearch.com.
+    # Reuses the same selected_by_category / selected_reviews already computed
+    # above for the Telegram digest; one extra Groq call per selected article
+    # (capped by _FINAL_MAX_ARTICLES) produces the structured fields the
+    # website needs that the Telegram HTML blob doesn't carry.
+    run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    website_articles: list[dict] = []
+    for category in CATEGORIES:
+        for result in selected_by_category.get(category.name, []):
+            review = selected_reviews.get(result.url)
+            content = None
+            try:
+                content = generate_website_content(ai_client, category, result, review)
+            except Exception as exc:  # noqa: BLE001 - one article must never block the rest
+                log.warning("Website content generation failed for '%s': %s", result.title, exc)
+            website_articles.append(build_website_record(category, result, review, content, run_date))
 
+    # Both stores are best-effort. Neither can invalidate an otherwise valid digest.
+    update_memory(memory, digests)
+    archive_selected(digests, selected_reviews)
+    return digests, stats, website_articles
 
 def main() -> None:
     log.info("Starting Hindu Research Daily Intelligence Agent run.")
@@ -904,7 +771,7 @@ def main() -> None:
     )
 
     log.info("Searching articles...")
-    digests, stats = generate_digest(tavily_client, ai_client)
+    digests, stats, website_articles = generate_digest(tavily_client, ai_client)
 
     log.info("Found %d articles", stats["found"])
     log.info("After quality filtering: %d", stats["after_filtering"])
@@ -914,7 +781,6 @@ def main() -> None:
     log.info("Editorial review failures: %d", stats["editorial_failures"])
     log.info("Low-confidence editorial rejects: %d", stats["low_confidence_rejected"])
     log.info("Final selected: %d", stats["final_selected"])
-    log.info("Memory-suppressed near-duplicates: %d", stats["memory_suppressed"])
     log.info("Skipped empty articles: %d", stats["skipped_empty"])
     log.info("AI summaries generated: %d", stats["ai_summaries_generated"])
     log.info("Fallback summaries used: %d", stats["fallback_summaries_used"])
@@ -922,11 +788,23 @@ def main() -> None:
     full_message = format_full_message(digests)
     log.info("Digest assembled (%d characters). Sending to Telegram...", len(full_message))
 
+    telegram_sent = False
     try:
         deliver_digest(settings.telegram_bot_token, settings.telegram_chat_id, full_message)
         log.info("Telegram message sent successfully")
+        telegram_sent = True
     except Exception as exc:  # noqa: BLE001
         log.error("Telegram delivery failed: %s", exc)
+
+    # Phase 6.0: publish the verified research to the separate hinduresearch.com
+    # repository, only after Telegram delivery has succeeded. Best-effort and
+    # non-fatal — publish_to_website never raises, and any failure here is
+    # logged without affecting the Telegram result above or the run's exit.
+    if telegram_sent:
+        try:
+            publish_to_website(website_articles)
+        except Exception as exc:  # noqa: BLE001 - website publish must never fail the run
+            log.error("Website publish failed: %s", exc)
 
     log.info("Run complete.")
 
