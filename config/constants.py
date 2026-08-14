@@ -108,6 +108,17 @@ TAVILY_MAX_RESULTS = 4
 TAVILY_SEARCH_DAYS = 1  # freshness window in days
 
 
+
+
+# ==========================================================================
+# Historical research memory
+# ==========================================================================
+
+# Local persistent state; this is intentionally not an environment variable so
+# existing deployment configuration remains unchanged.
+MEMORY_FILE = "data/research_memory.json"
+MEMORY_RETENTION_DAYS = 90
+
 # ==========================================================================
 # Telegram (delivery) settings
 # ==========================================================================
