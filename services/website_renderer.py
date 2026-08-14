@@ -215,19 +215,33 @@ def render_index(template: str, articles: list[dict[str, Any]], years: list[tupl
         date_display = article_date(article).strftime("%d %b %Y")
         en = _language_payload(article, "en")
         hi = _language_payload(article, "hi")
+        en_takeaways = _takeaways_html(en["key_takeaways"])
+        hi_takeaways = _takeaways_html(hi["key_takeaways"])
         cards.append(
             '<article class="news-card">'
-            f'<div class="news-card-meta"><span>{_escape(article.get("category"))}</span><time datetime="{_escape(_iso_date(article.get("first_published") or article.get("date")))}">{_escape(date_display)}</time></div>'
+            f'<div class="news-card-meta"><span>{_escape(article.get("category"))}</span></div>'
+            '<div class="news-card-toolbar">'
+            '<button type="button" class="language-toggle" data-language-toggle '
+            'aria-label="View this news card in Hindi" aria-pressed="false">'
+            '<span aria-hidden="true">🌐</span><span data-toggle-label>हिंदी में देखें</span></button>'
+            '</div>'
             '<div data-lang="en">'
             f'<h2><a href="{_escape(url)}">{_escape(en["title"])}</a></h2>'
             f'<p>{_escape(_description({"summary": en["summary"]}))}</p>'
+            f'<div class="card-detail"><h3>Key Takeaways</h3>{en_takeaways}</div>'
+            f'<div class="card-detail"><h3>Why This Matters</h3><p>{_escape(en["why_this_matters"])}</p></div>'
+            f'<div class="card-detail"><h3>Research Hook</h3><p>{_escape(en["research_hook"])}</p></div>'
             f'<a class="read-more" href="{_escape(url)}">Read research brief →</a>'
             '</div>'
             '<div data-lang="hi">'
             f'<h2><a href="{_escape(url)}">{_escape(hi["title"])}</a></h2>'
             f'<p>{_escape(_description({"summary": hi["summary"]}))}</p>'
+            f'<div class="card-detail"><h3>मुख्य बातें</h3>{hi_takeaways}</div>'
+            f'<div class="card-detail"><h3>यह क्यों महत्वपूर्ण है</h3><p>{_escape(hi["why_this_matters"])}</p></div>'
+            f'<div class="card-detail"><h3>रिसर्च हुक</h3><p>{_escape(hi["research_hook"])}</p></div>'
             f'<a class="read-more" href="{_escape(url)}">रिसर्च ब्रीफ़ पढ़ें →</a>'
             '</div>'
+            f'<div class="news-card-time"><time datetime="{_escape(_iso_date(article.get("first_published") or article.get("date")))}" data-upload-time></time></div>'
             '</article>'
         )
 
