@@ -73,14 +73,27 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
         return False
 
 
-def deliver_digest(bot_token: str, chat_id: str, full_text: str) -> None:
-    """Split (if needed) and deliver the digest, logging per-chunk outcomes."""
+def deliver_digest(bot_token: str, chat_id: str, full_text: str) -> bool:
+    """Split (if needed) and deliver the digest, logging per-chunk outcomes.
+
+    Returns True only if every chunk was sent successfully. Previously this
+    returned None unconditionally and never raised on a failed send, so
+    main.py's `try/except` around this call always treated the call as a
+    success (it only logs and swallows failures per-chunk) — meaning
+    website publishing could fire even after Telegram delivery had actually
+    failed. Callers should check the return value rather than relying on
+    the absence of an exception.
+    """
     chunks = split_message(full_text)
     log.info("Delivering digest in %d chunk(s).", len(chunks))
 
+    all_succeeded = True
     for i, chunk in enumerate(chunks, start=1):
         success = send_telegram_message(bot_token, chat_id, chunk)
+        all_succeeded = all_succeeded and success
         status = "sent" if success else "FAILED"
         log.info("Chunk %d/%d %s (%d chars).", i, len(chunks), status, len(chunk))
         if len(chunks) > 1:
             time.sleep(0.5)  # gentle pacing to avoid Telegram rate limits
+
+    return all_succeeded

@@ -24,7 +24,6 @@ from config.constants import (
     GROQ_MAX_RETRIES,
     GROQ_RETRY_BACKOFF_SECONDS,
     GROQ_TIMEOUT_SECONDS,
-    SYSTEM_INSTRUCTION,
 )
 from services.tavily_service import SearchResult
 from utils.helpers import current_utc_date_str
@@ -121,55 +120,6 @@ def build_user_prompt(category: Category, results: list[SearchResult]) -> str:
         lines.append(f"Snippet: {r.content[:800]}")  # cap snippet length for token safety
         lines.append("")
     return "\n".join(lines)
-
-
-def summarize_with_gemini(
-    client: GroqClient,
-    category: Category,
-    results: list[SearchResult],
-    editorial_reviews: dict[str, EditorialReview] | None = None,
-    historical_context: dict[str, list[dict]] | None = None,
-) -> str:
-    """
-    Summarize one category's search results via the configured Groq
-    model. Falls back to a graceful placeholder string on any API failure
-    (including after retries are exhausted).
-
-    Function name kept as `summarize_with_gemini` for interface stability —
-    this is the AI service's public entry point and no other module needs
-    to change — even though the underlying provider is now Groq.
-    """
-    if not results:
-        return "No significant fresh updates found for this category today."
-
-    lines = [f"Category: {category.name}", ""]
-    for i, r in enumerate(results, start=1):
-        lines.extend([f"Result {i}:", f"Title: {r.title}", f"URL: {r.url}", f"Snippet: {(r.content or '')[:1400]}"])
-        review = (editorial_reviews or {}).get(r.url)
-        if review is not None:
-            lines.append(
-                f"Editorial assessment: confidence={review.confidence:.0f}; research_value={review.research_value:.0f}; reason={review.reason}"
-            )
-        prior = (historical_context or {}).get(r.url, [])
-        if prior:
-            lines.append("Relevant historical context (use only if factually connected):")
-            for item in prior[:2]:
-                lines.append(
-                    f"- {item.get('reported_at','')}: {item.get('title','')} | topic={item.get('topic','')} | evidence={(item.get('content') or '')[:500]}"
-                )
-        lines.append("")
-    prompt = "\n".join(lines)
-
-    try:
-        return client.chat(system_instruction=SYSTEM_INSTRUCTION, user_prompt=prompt, temperature=0.4)
-    except Exception as exc:  # noqa: BLE001 - never let one bad summary kill the run
-        log.error("Groq summarization failed for '%s': %s", category.name, exc)
-        # Fallback: build a minimal manual digest so links are never lost.
-        fallback_lines = []
-        for r in results:
-            fallback_lines.append(f"🔗 <a href=\"{r.url}\">{r.title}</a>")
-        return "⚠️ AI summary unavailable — raw sources:\n" + "\n".join(fallback_lines)
-
 
 
 @dataclass
@@ -449,11 +399,29 @@ def summarize_with_gemini(
     category: Category,
     results: list[SearchResult],
     editorial_reviews: dict[str, EditorialReview] | None = None,
+    historical_context: dict[str, list[dict]] | None = None,
 ) -> str:
     """Summarize shortlisted sources with the existing Groq client.
 
-    The optional fourth argument is backward-compatible and lets Phase 3 pass
-    editorial evidence into the final writing prompt.
+    Function name kept as `summarize_with_gemini` for interface stability —
+    this is the AI service's public entry point and no other module needs
+    to change — even though the underlying provider is now Groq.
+
+    The two optional trailing arguments are backward-compatible: Phase 3
+    added `editorial_reviews` (AI gatekeeper evidence) and Phase 5 added
+    `historical_context` (prior same-topic coverage from working memory) so
+    the writing prompt can reference genuine continuity instead of treating
+    every article as if it appeared out of nowhere. Both are optional and
+    default to None so older callers still work unmodified.
+
+    NOTE: previously this function was defined twice in this module (once
+    here, once earlier accepting `historical_context` but using the older
+    SYSTEM_INSTRUCTION). The second definition silently shadowed the first,
+    so every call from main.py — which always passes 5 positional args —
+    raised TypeError and fell back to a degraded 3-arg call that dropped
+    both editorial_reviews and historical_context. This merged version
+    restores both without changing the public signature main.py already
+    expects.
     """
     if not results:
         return "No significant fresh updates found for this category today."
@@ -473,6 +441,14 @@ def summarize_with_gemini(
                 f"Editorial assessment: {decision}; confidence={review.confidence:.0f}; "
                 f"research_value={review.research_value:.0f}; reason={review.reason}"
             )
+        prior = (historical_context or {}).get(r.url, [])
+        if prior:
+            lines.append("Relevant historical context (use only if factually connected):")
+            for item in prior[:2]:
+                lines.append(
+                    f"- {item.get('reported_at','')}: {item.get('title','')} | "
+                    f"topic={item.get('topic','')} | evidence={(item.get('content') or '')[:500]}"
+                )
         lines.append("")
 
     try:

@@ -26,15 +26,15 @@ class SearchResult:
     published_date: str | None = None
 
 
-def run_tavily_search(client: TavilyClient, category: Category) -> list[SearchResult]:
+def run_tavily_search(client: TavilyClient, category: Category, topic: str = "news", query: str | None = None) -> list[SearchResult]:
     """
     Query Tavily for a single category. Returns an empty list (never raises)
     on failure or zero results, so one bad category can't crash the run.
     """
     try:
         response = client.search(
-            query=category.query,
-            topic="news",
+            query=query or category.query,
+            topic=topic,
             days=TAVILY_SEARCH_DAYS,
             max_results=TAVILY_MAX_RESULTS,
             include_answer=False,

@@ -116,11 +116,32 @@ def update_memory(memory: dict[str, Any], digests: list[Any]) -> None:
 
             topic_entry = next((x for x in topics if isinstance(x, dict) and x.get("name") == topic), None)
             if topic_entry is None:
-                topics.append({"name": topic, "last_reported_at": now, "timeline": [{"date": now, "title": result.title, "url": result.url}]})
+                topics.append(
+                    {
+                        "name": topic,
+                        "last_reported_at": now,
+                        "timeline": [
+                            {
+                                "date": now,
+                                "title": result.title,
+                                "url": result.url,
+                                "content": (result.content or "")[:300],
+                            }
+                        ],
+                    }
+                )
             else:
                 topic_entry["last_reported_at"] = now
-                timeline = topic_entry.setdefault("timeline", [])
-                timeline.append({"date": now, "title": result.title, "url": result.url})
+                topic_entry.setdefault("timeline", [])
+                timeline = topic_entry["timeline"]
+                timeline.append(
+                    {
+                        "date": now,
+                        "title": result.title,
+                        "url": result.url,
+                        "content": (result.content or "")[:300],
+                    }
+                )
                 topic_entry["timeline"] = timeline[-20:]
 
     memory["stories"] = stories[-_MAX_STORIES:]
@@ -145,3 +166,97 @@ def _derive_topic(result: SearchResult) -> str:
         if any(term in text for term in terms):
             return topic
     return "Other Research"
+
+
+def build_historical_context(
+    results: list[SearchResult], memory: dict[str, Any], limit: int = 3
+) -> dict[str, list[dict[str, Any]]]:
+    """For each result, surface prior stories memory already has on the same
+    topic, so the AI can (optionally) reference genuine continuity instead of
+    treating every article as if it appeared out of nowhere.
+
+    Returns a dict keyed by result URL -> a short list of prior story dicts
+    (most recent first), each with reported_at/title/topic/content. A lookup
+    failure for one result is logged and skipped; it never blocks the rest.
+    """
+    topics = memory.get("topics", [])
+    context: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        try:
+            topic = _derive_topic(result)
+            topic_entry = next(
+                (t for t in topics if isinstance(t, dict) and t.get("name") == topic), None
+            )
+            if not topic_entry:
+                continue
+            timeline = topic_entry.get("timeline", [])
+            own_url = (result.url or "").strip().lower()
+            prior = [
+                item
+                for item in reversed(timeline)
+                if isinstance(item, dict) and str(item.get("url", "")).strip().lower() != own_url
+            ][:limit]
+            if prior:
+                context[result.url] = [
+                    {
+                        "reported_at": item.get("date", ""),
+                        "title": item.get("title", ""),
+                        "topic": topic,
+                        "content": item.get("content", ""),
+                    }
+                    for item in prior
+                ]
+        except Exception as exc:  # noqa: BLE001 - one bad lookup must never block the rest
+            log.warning("Historical context lookup failed for '%s': %s", result.title, exc)
+    return context
+
+
+# ==========================================================================
+# Permanent published-article audit log (distinct from the 30-day working
+# memory above). Best-effort: a failure here must never break an otherwise
+# successful run, since it's called unguarded at the end of generate_digest.
+# ==========================================================================
+
+_ARCHIVE_PATH = Path(__file__).resolve().parent.parent / "memory" / "published_archive.json"
+_MAX_ARCHIVE_ENTRIES = 2000
+
+
+def archive_selected(digests: list[Any], selected_reviews: dict[str, Any]) -> None:
+    """Append today's final, published selection (with its editorial review)
+    to a permanent local audit log. Never raises."""
+    try:
+        _ARCHIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        existing: list[dict[str, Any]] = []
+        if _ARCHIVE_PATH.exists():
+            try:
+                loaded = json.loads(_ARCHIVE_PATH.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    existing = loaded
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Published archive unreadable, starting fresh: %s", exc)
+
+        now = datetime.now(timezone.utc).isoformat()
+        for digest in digests:
+            category = getattr(digest, "category", None)
+            category_name = getattr(category, "name", "") if category else ""
+            for result in getattr(digest, "results", []) or []:
+                review = selected_reviews.get(result.url)
+                existing.append(
+                    {
+                        "title": result.title,
+                        "url": result.url,
+                        "category": category_name,
+                        "archived_at": now,
+                        "published_date": getattr(result, "published_date", None),
+                        "editorial_confidence": getattr(review, "confidence", None),
+                        "editorial_research_value": getattr(review, "research_value", None),
+                        "editorial_reason": getattr(review, "reason", None),
+                    }
+                )
+
+        existing = existing[-_MAX_ARCHIVE_ENTRIES:]
+        tmp = _ARCHIVE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, _ARCHIVE_PATH)
+    except Exception as exc:  # noqa: BLE001 - archive must never fail the run
+        log.warning("Published archive update failed: %s", exc)
